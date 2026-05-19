@@ -99,10 +99,6 @@ missing prerequisites — they each have a reason.
 </p>
 
 <p align="center">
-  <img src="media/demo.gif" alt="Bridgy demo — phone screen recording" width="280">
-</p>
-
-<p align="center">
   <em>Self-hosted on your laptop · Your Claude subscription · No third-party relay</em>
 </p>
 
@@ -111,6 +107,14 @@ A self-hosted mobile bridge to [Claude Code](https://docs.claude.com/code) runni
 Use your iPhone (or any phone) to chat with Claude Code running on your Windows / macOS / Linux machine — over Tailscale (or any other tunnel you prefer), no public exposure, your own Claude subscription, no third-party relay. Drive multiple parallel conversations from a multi-tab PWA, watch your laptop's tool calls stream live, hand sessions off between your desktop and your phone.
 
 > ⚠️ **Read [the Security warnings section](#-security-warnings--read-before-running) before exposing this on any network.** A connected client of this bridge can run arbitrary shell commands on your laptop.
+
+## See it in action
+
+<p align="center">
+  <img src="media/demo.gif" alt="Bridgy demo — phone screen recording showing tabs, voice input, and a live Claude run" width="280">
+</p>
+
+Real iPhone screen recording: switching tabs, dictating a prompt with the mic button, watching tool calls stream in, jumping back to a past chat from the Sessions drawer.
 
 ## TL;DR — five-minute setup
 
