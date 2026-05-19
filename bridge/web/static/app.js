@@ -4620,8 +4620,13 @@ function attachMessageLongPress(msgEl, getText, opts) {
       label: 'Copy', icon: COPY_ICON, action: () => _copyToClipboard(text, 'Copied to clipboard'),
     }];
     if (o.editable) {
+      // Callers can override the default chat-history Edit/Delete with
+      // their own handlers (e.g. queued bubbles need queue-aware actions
+      // that pull text back into the composer / drop from the queue,
+      // NOT the chat-history edit-and-resend flow).
       items.push({
-        label: 'Edit', icon: EDIT_ICON, action: () => _enterMessageEdit(msgEl, text),
+        label: 'Edit', icon: EDIT_ICON,
+        action: o.onEdit ? o.onEdit : () => _enterMessageEdit(msgEl, text),
       });
     }
     // Delete is offered on every user bubble (and any element that opts
@@ -4633,7 +4638,7 @@ function attachMessageLongPress(msgEl, getText, opts) {
     if (o.editable) {
       items.push({
         label: 'Delete', icon: DELETE_ICON, destructive: true,
-        action: () => _deleteUserMessage(msgEl),
+        action: o.onDelete ? o.onDelete : () => _deleteUserMessage(msgEl),
       });
     }
     return items;
@@ -5508,6 +5513,18 @@ const Chat = {
     bubble.append(tag);
     wrap.append(bubble);
     pane.append(wrap);
+    // Long-press menu (Copy / Edit / Delete) — same gesture as sent user
+    // messages, but the actions are queued-specific: Edit pulls the entry
+    // back into the composer (and removes from queue), Delete drops the
+    // entry from the queue without touching chat history (the message
+    // never actually shipped). Copy is identical to the sent-message case.
+    attachMessageLongPress(wrap, () => wrap.dataset.text || text || '', {
+      editable: true,
+      // Custom handlers passed via the options bag so attachMessageLongPress
+      // doesn't need to know about the queue at all.
+      onEdit: () => _editQueuedEntry(tabId, wrap),
+      onDelete: () => _deleteQueuedEntry(tabId, wrap),
+    });
     this.scrollToBottom(true);
     return wrap;
   },
@@ -6171,8 +6188,27 @@ const Chat = {
       if (!(opts && opts.silent)) {
         const tab = getTab(tabId);
         if (tab) {
+          // Defensive: kill any stale .msg--asst.msg--running in this
+          // tab's pane. If the runs map has an orphan from a prior
+          // (mismatched) run_started, the cycler on that container
+          // never gets cleared via the main finishRun path and the
+          // kawaii + gibberish-word animation keeps spinning forever
+          // even though Claude is done. Sweep them on every orphan
+          // run_finished so they can never leak.
+          const pane = tab._chatpane;
+          if (pane) {
+            pane.querySelectorAll('.msg--asst.msg--running:not(.msg--ghostThinking)')
+              .forEach((stale) => {
+                try { stale.classList.remove('msg--running'); } catch {}
+              });
+          }
           const runs = this._runsFor(tabId);
-          tab.running = !!(runs && runs.size > 0);
+          // Trust the server: a run_finished frame means there's nothing
+          // active. Clear the local runs map even on orphans so a stale
+          // entry can't keep tab.running stuck true.
+          if (runs) runs.clear();
+          tab.running = false;
+          tab._lastFinishedAt = Date.now();
           renderTabs();
           updateSendButton();
           this.ensureRunningSpinner(tab.id);
@@ -6256,6 +6292,11 @@ const Chat = {
     const tab = getTab(tabId);
     if (tab && !(opts && opts.silent)) {
       tab.running = runs && runs.size > 0;
+      // Mark the local moment of finish so a stale hello frame arriving
+      // within the next few seconds (server hasn't fully cleared its
+      // list_running yet) can't re-assert tab.running=true and re-spawn
+      // the ghost spinner with its own cycler.
+      if (!tab.running) tab._lastFinishedAt = Date.now();
       renderTabs();
       // Drain ONE queued prompt — the next run_finished cycle picks
       // up the next one. Each queued prompt becomes its own turn in
@@ -6400,7 +6441,21 @@ const Chat = {
               tab.running = false;
               if (tab._activeRuns) tab._activeRuns.clear();
             } else if (live) {
-              tab.running = true;
+              // Ignore "still running" if we JUST finished a run locally.
+              // Server's list_running has a brief reconciliation lag; a
+              // hello arriving within ~3s of finishRun would otherwise
+              // re-mark the tab as live and spawn a ghost spinner whose
+              // cycler runs forever (kawaii + gibberish-word stuck —
+              // reported 2026-05-19).
+              const finishedAge = tab._lastFinishedAt
+                ? Date.now() - tab._lastFinishedAt
+                : Infinity;
+              if (finishedAge < 3000) {
+                tab.running = false;
+                if (tab._activeRuns) tab._activeRuns.clear();
+              } else {
+                tab.running = true;
+              }
             }
             // After reconciling, sync the placeholder spinner so a
             // restored tab whose run is still alive on the server
@@ -6505,6 +6560,12 @@ const Chat = {
             tab.running = true;
             if (!tab._queue) tab._queue = [];
             tab._queue.push(payload);
+            // Persist immediately — without this, a queued prompt added
+            // via the server-busy path (vs. the client-side _enqueueCurrentPrompt
+            // path which already persists) vanishes on app close+reopen.
+            // The other persist sites won't pick it up because nothing else
+            // mutates here until run_finished or the user types again.
+            try { _persistTabs(); } catch {}
             // The user already saw their bubble appear (sendPrompt
             // pushed it). Visually demote it to "queued" so they know
             // the message isn't being processed YET — it's stacked up.
@@ -10285,6 +10346,52 @@ function _clearQueuedBubbles(tab) {
   for (const entry of tab._queue) {
     try { entry._node?.remove(); } catch {}
   }
+}
+
+// Long-press → Edit on a queued bubble. Pulls the queued text back into
+// the composer, restores any attachments, removes the entry from
+// tab._queue (so it won't auto-fire when the current run finishes),
+// removes the dimmed bubble from the chat, and persists the new state.
+// The user can then re-edit and either re-queue or send fresh.
+function _editQueuedEntry(tabId, node) {
+  const tab = tabId ? getTab(tabId) : getActiveTab();
+  if (!tab || !tab._queue || !node) return;
+  const idx = tab._queue.findIndex((e) => e && e._node === node);
+  if (idx < 0) return;
+  const [entry] = tab._queue.splice(idx, 1);
+  if (input) {
+    // If the composer already has typed text, prepend the queued text
+    // with a newline gap so we don't silently destroy the draft.
+    const existing = input.value || '';
+    input.value = existing
+      ? `${entry.text || ''}\n\n${existing}`
+      : (entry.text || '');
+    tab.draft = input.value;
+    try { autosizeInput(); } catch {}
+    try { input.focus(); } catch {}
+  }
+  // Restore attachments to the composer chip row. If there are already
+  // attachments on the composer, merge — don't blow them away.
+  if (entry.attachments && entry.attachments.length) {
+    tab._attachments = (tab._attachments || []).concat(entry.attachments);
+    try { renderAttachments(); } catch {}
+  }
+  try { node.remove(); } catch {}
+  try { _persistTabs(); } catch {}
+  try { updateSendButton(); } catch {}
+}
+
+// Long-press → Delete on a queued bubble. Drops the entry from the
+// queue and removes the bubble. No chat-history concern because the
+// message was never actually shipped to claude.
+function _deleteQueuedEntry(tabId, node) {
+  const tab = tabId ? getTab(tabId) : getActiveTab();
+  if (!tab || !tab._queue || !node) return;
+  const idx = tab._queue.findIndex((e) => e && e._node === node);
+  if (idx >= 0) tab._queue.splice(idx, 1);
+  try { node.remove(); } catch {}
+  try { _persistTabs(); } catch {}
+  try { updateSendButton(); } catch {}
 }
 
 // Drain one queued prompt for `tab` and ship it. Called from the
