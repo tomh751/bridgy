@@ -99,16 +99,14 @@ missing prerequisites — they each have a reason.
 </p>
 
 <p align="center">
-  <a href="media/demo.mp4">▶ Watch the 60-second demo</a>
+  <img src="media/demo.gif" alt="Bridgy demo — phone screen recording" width="280">
+</p>
+
+<p align="center">
+  <a href="media/demo.mp4">▶ Watch the full demo (HD with audio)</a>
   &nbsp;·&nbsp;
   <em>Self-hosted on your laptop · Your Claude subscription · No third-party relay</em>
 </p>
-
-<!-- Inline player. GitHub renders this as an embedded HTML5 video on the
-     web; on GitHub mobile + RSS / other surfaces it falls back to the
-     "Watch the demo" link above, so no surface ends up blank. -->
-
-https://github.com/tomh751/claude-remote-control-bridgy/raw/main/media/demo.mp4
 
 A self-hosted mobile bridge to [Claude Code](https://docs.claude.com/code) running on your laptop.
 
